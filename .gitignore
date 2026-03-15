@@ -1,0 +1,20 @@
+# Binary
+photo-frame
+dad-frame
+
+# Runtime data
+photos/
+data/
+*.db
+
+# Go
+__debug_bin*
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# OS
+.DS_Store
+Thumbs.db

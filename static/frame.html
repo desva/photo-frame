@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Family Photos</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #000;
+    overflow: hidden;
+    cursor: none;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  }
+  body.active { cursor: default; }
+
+  #banner {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 100;
+    background: rgba(0,0,0,0.7);
+    color: #fff;
+    text-align: center;
+    padding: 12px 20px;
+    font-size: 22px;
+    display: none;
+    backdrop-filter: blur(5px);
+  }
+
+  #slideshow {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+  }
+
+  #slideshow img {
+    position: absolute;
+    top: 0; left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    opacity: 0;
+    transition: opacity 2s ease-in-out;
+  }
+  #slideshow img.visible { opacity: 1; }
+
+  #caption {
+    position: fixed;
+    bottom: 50px;
+    left: 0;
+    right: 0;
+    text-align: center;
+    color: #fff;
+    font-size: 18px;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.8);
+    padding: 8px 20px;
+    opacity: 0;
+    transition: opacity 1s ease;
+  }
+  #caption.visible { opacity: 1; }
+
+  #clock {
+    position: fixed;
+    bottom: 10px;
+    right: 15px;
+    color: rgba(255,255,255,0.4);
+    font-size: 16px;
+  }
+
+  #offline-indicator {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    color: rgba(255,100,100,0.6);
+    font-size: 12px;
+    display: none;
+    z-index: 101;
+  }
+
+  #loading {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 24px;
+    color: rgba(255,255,255,0.5);
+  }
+</style>
+</head>
+<body>
+
+<div id="banner">{{BANNER}}</div>
+<div id="slideshow">
+  <div id="loading">Loading photos...</div>
+</div>
+<div id="caption"></div>
+<div id="clock"></div>
+<div id="offline-indicator"></div>
+
+<script>
+const SLIDE_SECONDS = {{SECONDS}};
+const PHOTO_BATCH = 20;
+const BANNER_POLL_SECONDS = 30;
+
+let photos = [];
+let photoIndex = 0;
+let currentImg = null;
+let lastBannerFetch = Date.now();
+let offlineSince = null;
+
+async function fetchPhotos() {
+  try {
+    const res = await fetch('/api/photos?count=' + PHOTO_BATCH);
+    const data = await res.json();
+    if (data.photos && data.photos.length > 0) {
+      photos = photos.concat(data.photos);
+      document.getElementById('loading').style.display = 'none';
+    }
+    setOnline();
+  } catch (e) {
+    console.error('Failed to fetch photos:', e);
+  }
+}
+
+function showNextPhoto() {
+  if (photos.length === 0) return;
+
+  const photo = photos[photoIndex % photos.length];
+  photoIndex++;
+
+  // Shuffle when we've shown all photos
+  if (photoIndex >= photos.length) {
+    photos.sort(() => Math.random() - 0.5);
+    photoIndex = 0;
+    // Also fetch more
+    fetchPhotos();
+  }
+
+  const img = new Image();
+  img.onload = function() {
+    const container = document.getElementById('slideshow');
+    if (currentImg) {
+      currentImg.classList.remove('visible');
+      const old = currentImg;
+      setTimeout(() => { if (old.parentNode) old.parentNode.removeChild(old); }, 2000);
+    }
+    container.appendChild(img);
+    requestAnimationFrame(() => { img.classList.add('visible'); });
+    currentImg = img;
+
+    // Show caption and people tags
+    const cap = document.getElementById('caption');
+    let capText = photo.caption || '';
+    if (photo.people && photo.people.length > 0) {
+      capText = photo.people.join(', ') + (capText ? ' \u2014 ' + capText : '');
+    }
+    if (capText) {
+      cap.textContent = capText;
+      cap.classList.add('visible');
+      setTimeout(() => cap.classList.remove('visible'), SLIDE_SECONDS * 1000 - 2000);
+    }
+  };
+  img.onerror = function() {
+    setTimeout(showNextPhoto, 100);
+  };
+  img.src = '/api/image/' + encodeURIComponent(photo.path);
+}
+
+function updateClock() {
+  const now = new Date();
+  const h = String(now.getHours()).padStart(2, '0');
+  const m = String(now.getMinutes()).padStart(2, '0');
+  document.getElementById('clock').textContent = h + ':' + m;
+}
+
+async function pollBanner() {
+  try {
+    const res = await fetch('/api/config');
+    const config = await res.json();
+    const bannerEl = document.getElementById('banner');
+    if (config.banner) {
+      bannerEl.textContent = config.banner;
+      bannerEl.style.display = 'block';
+    } else {
+      bannerEl.style.display = 'none';
+    }
+    lastBannerFetch = Date.now();
+    setOnline();
+  } catch (e) {
+    // Server unreachable - keep showing last known state
+  }
+}
+
+function setOnline() {
+  offlineSince = null;
+  document.getElementById('offline-indicator').style.display = 'none';
+}
+
+// Hide cursor after inactivity
+let cursorTimer;
+document.addEventListener('mousemove', () => {
+  document.body.classList.add('active');
+  clearTimeout(cursorTimer);
+  cursorTimer = setTimeout(() => document.body.classList.remove('active'), 3000);
+});
+
+// Init
+(async function() {
+  await fetchPhotos();
+  if (photos.length === 0) {
+    document.getElementById('loading').textContent = 'No photos yet. Waiting for sync...';
+    // Retry every 10 seconds
+    const retryInterval = setInterval(async () => {
+      await fetchPhotos();
+      if (photos.length > 0) {
+        clearInterval(retryInterval);
+        showNextPhoto();
+        setInterval(showNextPhoto, SLIDE_SECONDS * 1000);
+      }
+    }, 10000);
+  } else {
+    showNextPhoto();
+    setInterval(showNextPhoto, SLIDE_SECONDS * 1000);
+  }
+  updateClock();
+  setInterval(updateClock, 30000);
+  setInterval(pollBanner, BANNER_POLL_SECONDS * 1000);
+
+  // Show banner if set
+  const bannerEl = document.getElementById('banner');
+  if (bannerEl.textContent.trim()) {
+    bannerEl.style.display = 'block';
+  }
+})();
+</script>
+</body>
+</html>

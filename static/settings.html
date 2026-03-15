@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Photo Frame Settings</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    background: #1a1a2e;
+    color: #e0e0e0;
+    padding: 20px;
+    max-width: 600px;
+    margin: 0 auto;
+  }
+  h1 { color: #fff; margin-bottom: 20px; }
+  .card {
+    background: #16213e;
+    border-radius: 8px;
+    padding: 20px;
+    margin-bottom: 15px;
+  }
+  label { display: block; margin-bottom: 5px; font-weight: 600; }
+  input[type="text"], input[type="number"] {
+    width: 100%;
+    padding: 10px;
+    border: 1px solid #333;
+    border-radius: 5px;
+    background: #0f3460;
+    color: #fff;
+    font-size: 16px;
+    margin-bottom: 10px;
+  }
+  .btn {
+    display: inline-block;
+    padding: 10px 20px;
+    border: none;
+    border-radius: 5px;
+    font-size: 16px;
+    cursor: pointer;
+    margin-right: 8px;
+    margin-bottom: 8px;
+  }
+  .btn-primary { background: #e94560; color: #fff; }
+  .btn-secondary { background: #533483; color: #fff; }
+  .btn-success { background: #1a8a5c; color: #fff; }
+  .btn:hover { opacity: 0.85; }
+  .status { margin-top: 10px; padding: 8px; border-radius: 4px; display: none; }
+  .status.success { display: block; background: #1a8a5c; }
+  .status.error { display: block; background: #e94560; }
+  .quick-messages { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  .info { color: #888; font-size: 13px; margin-top: 5px; }
+  .health { margin-top: 10px; font-size: 14px; color: #aaa; }
+  a { color: #e94560; }
+</style>
+</head>
+<body>
+<h1>Photo Frame Settings</h1>
+
+<div class="card">
+  <label>Banner Message</label>
+  <input type="text" id="banner" placeholder="Message to show on the frame">
+  <div class="quick-messages">
+    <button class="btn btn-secondary" onclick="setBanner('Call me back')">Call me back</button>
+    <button class="btn btn-secondary" onclick="setBanner('Doctors appointment')">Doctors appt</button>
+    <button class="btn btn-secondary" onclick="setBanner('Happy Birthday!')">Happy Birthday</button>
+    <button class="btn btn-secondary" onclick="setBanner('')">Clear Banner</button>
+  </div>
+  <button class="btn btn-primary" onclick="saveConfig()" style="margin-top: 15px;">Save</button>
+  <div id="status" class="status"></div>
+</div>
+
+<div class="card">
+  <label>Slideshow Speed (seconds per photo)</label>
+  <input type="number" id="seconds" min="5" max="120" value="20">
+  <p class="info">How long each photo is shown before advancing.</p>
+</div>
+
+<div class="card">
+  <a href="/" target="_blank">Open Photo Frame</a>
+  <div id="health" class="health">Loading...</div>
+</div>
+
+<script>
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const config = await res.json();
+    document.getElementById('banner').value = config.banner || '';
+    document.getElementById('seconds').value = config.slideshow_seconds || 20;
+  } catch (e) {}
+}
+
+async function loadHealth() {
+  try {
+    const res = await fetch('/api/health');
+    const h = await res.json();
+    document.getElementById('health').textContent =
+      `Photos: ${h.photos} | Uptime: ${h.uptime}`;
+  } catch (e) {
+    document.getElementById('health').textContent = 'Could not fetch health info';
+  }
+}
+
+function setBanner(text) {
+  document.getElementById('banner').value = text;
+  saveConfig();
+}
+
+async function saveConfig() {
+  const banner = document.getElementById('banner').value;
+  const seconds = parseInt(document.getElementById('seconds').value) || 20;
+  try {
+    const res = await fetch('/api/config?clear_banner=' + (banner === '' ? 'true' : 'false'), {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        banner: banner,
+        slideshow_seconds: seconds,
+        enabled: true,
+        updated_by: 'admin'
+      })
+    });
+    const data = await res.json();
+    const status = document.getElementById('status');
+    if (data.ok) {
+      status.className = 'status success';
+      status.textContent = 'Saved!';
+    } else {
+      status.className = 'status error';
+      status.textContent = 'Error: ' + (data.error || 'unknown');
+    }
+    setTimeout(() => { status.style.display = 'none'; }, 3000);
+  } catch (e) {
+    const status = document.getElementById('status');
+    status.className = 'status error';
+    status.textContent = 'Connection error';
+  }
+}
+
+loadConfig();
+loadHealth();
+setInterval(loadHealth, 30000);
+</script>
+</body>
+</html>
