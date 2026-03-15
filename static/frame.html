@@ -164,7 +164,7 @@ function showNextPhoto() {
   img.onerror = function() {
     setTimeout(showNextPhoto, 100);
   };
-  img.src = '/api/image/' + encodeURIComponent(photo.path);
+  img.src = '/api/image/' + photo.path.split('/').map(encodeURIComponent).join('/');
 }
 
 function updateClock() {
@@ -224,7 +224,7 @@ document.addEventListener('mousemove', () => {
     setInterval(showNextPhoto, SLIDE_SECONDS * 1000);
   }
   updateClock();
-  setInterval(updateClock, 30000);
+  setInterval(updateClock, 60000);
   setInterval(pollBanner, BANNER_POLL_SECONDS * 1000);
 
   // Show banner if set

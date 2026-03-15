@@ -22,7 +22,7 @@
     margin-bottom: 15px;
   }
   label { display: block; margin-bottom: 5px; font-weight: 600; }
-  input[type="text"], input[type="number"] {
+  input[type="text"], input[type="number"], input[type="password"] {
     width: 100%;
     padding: 10px;
     border: 1px solid #333;
@@ -57,6 +57,12 @@
 </head>
 <body>
 <h1>Photo Frame Settings</h1>
+
+<div class="card">
+  <label>Sync Token</label>
+  <input type="password" id="token" placeholder="Enter sync token to save changes">
+  <p class="info">Required for saving settings (same as SYNC_TOKEN environment variable).</p>
+</div>
 
 <div class="card">
   <label>Banner Message</label>
@@ -109,12 +115,23 @@ function setBanner(text) {
 }
 
 async function saveConfig() {
+  const token = document.getElementById('token').value;
+  if (!token) {
+    const status = document.getElementById('status');
+    status.className = 'status error';
+    status.textContent = 'Enter sync token first';
+    setTimeout(() => { status.style.display = 'none'; }, 3000);
+    return;
+  }
   const banner = document.getElementById('banner').value;
   const seconds = parseInt(document.getElementById('seconds').value) || 20;
   try {
-    const res = await fetch('/api/config?clear_banner=' + (banner === '' ? 'true' : 'false'), {
+    const res = await fetch('/api/config', {
       method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Sync-Token': token
+      },
       body: JSON.stringify({
         banner: banner,
         slideshow_seconds: seconds,
@@ -122,8 +139,14 @@ async function saveConfig() {
         updated_by: 'admin'
       })
     });
-    const data = await res.json();
     const status = document.getElementById('status');
+    if (res.status === 401) {
+      status.className = 'status error';
+      status.textContent = 'Invalid token';
+      setTimeout(() => { status.style.display = 'none'; }, 3000);
+      return;
+    }
+    const data = await res.json();
     if (data.ok) {
       status.className = 'status success';
       status.textContent = 'Saved!';

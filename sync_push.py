@@ -14,6 +14,9 @@ Usage:
 Environment:
     FRAME_HOST     Target host:port (default: localhost:8085)
     SYNC_TOKEN     Auth token (default: changeme)
+    CAPTIONS_DB    Path to photo_captions.db
+    FILTER_DB      Path to photo_filter.db
+    PHOTO_ROOTS    Colon-separated photo source directories
 """
 
 import argparse
@@ -27,15 +30,18 @@ import urllib.error
 
 BASE = os.path.dirname(os.path.abspath(__file__))
 PARENT = os.path.dirname(BASE)
-CAPTIONS_DB = os.path.join(PARENT, "photo_captions.db")
-FILTER_DB = os.path.join(PARENT, "photo_filter.db")
+
+# All paths configurable via environment variables
+CAPTIONS_DB = os.environ.get("CAPTIONS_DB", os.path.join(PARENT, "photo_captions.db"))
+FILTER_DB = os.environ.get("FILTER_DB", os.path.join(PARENT, "photo_filter.db"))
 SYNC_STATE = os.path.join(BASE, "data", "last_sync.json")
 
-# Photo source directories
-PHOTO_ROOTS = [
+# Photo source directories — override with colon-separated PHOTO_ROOTS env var
+DEFAULT_PHOTO_ROOTS = [
     "/media/desva/Backup/FamilyPhotos/",
     "/media/desva/Elements/",
 ]
+PHOTO_ROOTS = os.environ.get("PHOTO_ROOTS", "").split(":") if os.environ.get("PHOTO_ROOTS") else DEFAULT_PHOTO_ROOTS
 
 BATCH_SIZE = 100  # Photos per metadata sync request
 
@@ -65,9 +71,9 @@ def get_photos_to_sync(full=False):
     """Get photos that need syncing (not flagged, with metadata)."""
     conn = sqlite3.connect(CAPTIONS_DB, timeout=30)
 
-    # Attach filter DB to exclude flagged photos
+    # Attach filter DB to exclude flagged photos — use parameterised path
     if os.path.exists(FILTER_DB):
-        conn.execute(f"ATTACH '{FILTER_DB}' AS filt")
+        conn.execute("ATTACH DATABASE ? AS filt", (FILTER_DB,))
         query = """
             SELECT c.path, c.caption FROM captions c
             LEFT JOIN filt.classifications f ON c.path = f.path
@@ -151,7 +157,7 @@ def sync_metadata(target, token, photos, dry_run=False):
 
 
 def sync_photo_files(target, token, photos, dry_run=False):
-    """Push actual photo files that don't exist on the remote."""
+    """Push actual photo files that don't exist on the remote (streaming)."""
     pushed = 0
     errors = 0
 
@@ -167,22 +173,22 @@ def sync_photo_files(target, token, photos, dry_run=False):
             continue
 
         try:
+            file_size = os.path.getsize(abs_path)
             with open(abs_path, "rb") as f:
-                data = f.read()
-
-            req = urllib.request.Request(
-                f"http://{target}/api/sync/photo?path={urllib.request.quote(rel_path)}",
-                data=data,
-                headers={
-                    "X-Sync-Token": token,
-                    "Content-Type": "application/octet-stream",
-                },
-                method="POST",
-            )
-            resp = urllib.request.urlopen(req, timeout=60)
-            result = json.loads(resp.read())
-            if result.get("ok"):
-                pushed += 1
+                req = urllib.request.Request(
+                    f"http://{target}/api/sync/photo?path={urllib.request.quote(rel_path)}",
+                    data=f,
+                    headers={
+                        "X-Sync-Token": token,
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(file_size),
+                    },
+                    method="POST",
+                )
+                resp = urllib.request.urlopen(req, timeout=60)
+                result = json.loads(resp.read())
+                if result.get("ok"):
+                    pushed += 1
             if pushed % 100 == 0:
                 print(f"  Pushed {pushed} photo files...")
         except Exception as e:

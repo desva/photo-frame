@@ -22,7 +22,7 @@ Designed to run on any Linux box (Raspberry Pi, NUC, old laptop) connected to a 
 
 ### Prerequisites
 
-- Go 1.21+ (for building from source)
+- Go 1.22+ (for building from source)
 - GCC (required for SQLite via cgo)
 
 ### Build
@@ -84,7 +84,15 @@ python3 sync_push.py --metadata-only
 python3 sync_push.py --dry-run
 ```
 
-The sync script reads from a SQLite captions database (photo_captions.db) and pushes photo metadata and files to the frame. Modify the `PHOTO_ROOTS` and `CAPTIONS_DB` paths in the script to match your setup.
+The sync script reads from a SQLite captions database and pushes photo metadata and files to the frame. Configure paths via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FRAME_HOST` | `localhost:8085` | Target frame host:port |
+| `SYNC_TOKEN` | `changeme` | Auth token |
+| `CAPTIONS_DB` | `../photo_captions.db` | Path to captions SQLite database |
+| `FILTER_DB` | `../photo_filter.db` | Path to photo filter database |
+| `PHOTO_ROOTS` | (hardcoded defaults) | Colon-separated photo source directories |
 
 #### API Endpoints
 
@@ -93,7 +101,7 @@ The sync script reads from a SQLite captions database (photo_captions.db) and pu
 | `/` | GET | No | Slideshow page |
 | `/settings` | GET | No | Settings page |
 | `/api/config` | GET | No | Get current config |
-| `/api/config` | PUT | No | Update config |
+| `/api/config` | PUT | Yes | Update config (banner, slideshow speed) |
 | `/api/photos` | GET | No | Get random photos with metadata |
 | `/api/image/{path}` | GET | No | Serve a photo file |
 | `/api/sync` | POST | Yes | Sync photo metadata (batch) |
@@ -115,9 +123,10 @@ curl -X POST "http://host:8085/api/sync/photo?path=vacation/beach.jpg" \
   -H "Content-Type: application/octet-stream" \
   --data-binary @beach.jpg
 
-# Set a banner
+# Set a banner (requires auth)
 curl -X PUT http://host:8085/api/config \
   -H "Content-Type: application/json" \
+  -H "X-Sync-Token: mysecret" \
   -d '{"banner": "Dinner at 7!", "slideshow_seconds": 15, "enabled": true}'
 ```
 

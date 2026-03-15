@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -56,6 +55,8 @@ type App struct {
 	syncToken string
 }
 
+const maxUploadSize = 50 * 1024 * 1024 // 50MB
+
 func main() {
 	port := "8085"
 	photoDir := "./photos"
@@ -73,10 +74,17 @@ func main() {
 	}
 	if syncToken == "" {
 		syncToken = "changeme"
+		log.Println("WARNING: Using default sync token. Set SYNC_TOKEN environment variable for production use.")
 	}
 
 	os.MkdirAll(photoDir, 0755)
 	os.MkdirAll(configDir, 0755)
+
+	// Resolve to absolute paths for reliable path traversal checks
+	absPhotoDir, err := filepath.Abs(photoDir)
+	if err != nil {
+		log.Fatalf("Failed to resolve photo dir: %v", err)
+	}
 
 	dbPath := filepath.Join(configDir, "frame.db")
 	db, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=5000")
@@ -86,7 +94,7 @@ func main() {
 
 	app := &App{
 		db:        db,
-		photoDir:  photoDir,
+		photoDir:  absPhotoDir,
 		configDir: configDir,
 		syncToken: syncToken,
 	}
@@ -108,9 +116,8 @@ func main() {
 	mux.HandleFunc("/api/health", app.handleHealth)
 
 	log.Printf("Photo Frame starting on :%s", port)
-	log.Printf("  Photo dir: %s", photoDir)
+	log.Printf("  Photo dir: %s", absPhotoDir)
 	log.Printf("  Config dir: %s", configDir)
-	log.Printf("  Sync token: %s...", syncToken[:min(4, len(syncToken))])
 	log.Fatal(http.ListenAndServe(":"+port, mux))
 }
 
@@ -168,13 +175,24 @@ func (a *App) loadConfig() {
 	}
 }
 
-func (a *App) saveConfig() {
+func (a *App) saveConfig() error {
 	a.config.LastUpdated = time.Now().UTC().Format(time.RFC3339)
-	a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('banner',?)", a.config.Banner)
-	a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('slideshow_seconds',?)", fmt.Sprintf("%d", a.config.SlideshowSeconds))
-	a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('enabled',?)", fmt.Sprintf("%v", a.config.Enabled))
-	a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('last_updated',?)", a.config.LastUpdated)
-	a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('updated_by',?)", a.config.UpdatedBy)
+	if _, err := a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('banner',?)", a.config.Banner); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('slideshow_seconds',?)", fmt.Sprintf("%d", a.config.SlideshowSeconds)); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('enabled',?)", fmt.Sprintf("%v", a.config.Enabled)); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('last_updated',?)", a.config.LastUpdated); err != nil {
+		return err
+	}
+	if _, err := a.db.Exec("INSERT OR REPLACE INTO config(key,value) VALUES('updated_by',?)", a.config.UpdatedBy); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *App) handleFrame(w http.ResponseWriter, r *http.Request) {
@@ -218,14 +236,29 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(a.config)
 	} else if r.Method == "PUT" {
-		var req Config
+		// Config changes require sync token authentication
+		token := r.Header.Get("X-Sync-Token")
+		if token != a.syncToken {
+			http.Error(w, "Unauthorized", 401)
+			return
+		}
+
+		var req struct {
+			Banner           *string `json:"banner"`
+			SlideshowSeconds int     `json:"slideshow_seconds"`
+			Enabled          bool    `json:"enabled"`
+			UpdatedBy        string  `json:"updated_by"`
+		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, `{"error":"bad json"}`, 400)
 			return
 		}
+
 		a.configMu.Lock()
-		if req.Banner != "" || r.URL.Query().Get("clear_banner") == "true" {
-			a.config.Banner = req.Banner
+		defer a.configMu.Unlock()
+
+		if req.Banner != nil {
+			a.config.Banner = *req.Banner
 		}
 		if req.SlideshowSeconds > 0 {
 			a.config.SlideshowSeconds = req.SlideshowSeconds
@@ -235,11 +268,11 @@ func (a *App) handleConfig(w http.ResponseWriter, r *http.Request) {
 		if a.config.UpdatedBy == "" {
 			a.config.UpdatedBy = "admin"
 		}
-		a.saveConfig()
-		a.configMu.Unlock()
+		if err := a.saveConfig(); err != nil {
+			http.Error(w, `{"error":"failed to save config"}`, 500)
+			return
+		}
 
-		a.configMu.RLock()
-		defer a.configMu.RUnlock()
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"ok": true, "config": a.config})
 	} else {
@@ -260,7 +293,13 @@ func (a *App) handlePhotos(w http.ResponseWriter, r *http.Request) {
 		count = 50
 	}
 
-	rows, err := a.db.Query("SELECT path, caption FROM photos ORDER BY RANDOM() LIMIT ?", count)
+	rows, err := a.db.Query(`
+		SELECT p.path, p.caption, COALESCE(GROUP_CONCAT(pt.person_name, '|'), '') as people
+		FROM photos p
+		LEFT JOIN people_tags pt ON p.path = pt.photo_path
+		GROUP BY p.path
+		ORDER BY RANDOM()
+		LIMIT ?`, count)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{"photos": []Photo{}})
@@ -271,16 +310,13 @@ func (a *App) handlePhotos(w http.ResponseWriter, r *http.Request) {
 	var photos []Photo
 	for rows.Next() {
 		var p Photo
-		rows.Scan(&p.Path, &p.Caption)
-		// Get people tags
-		tagRows, err := a.db.Query("SELECT DISTINCT person_name FROM people_tags WHERE photo_path = ?", p.Path)
-		if err == nil {
-			for tagRows.Next() {
-				var name string
-				tagRows.Scan(&name)
-				p.People = append(p.People, name)
-			}
-			tagRows.Close()
+		var peopleStr string
+		rows.Scan(&p.Path, &p.Caption, &peopleStr)
+		if peopleStr != "" {
+			p.People = strings.Split(peopleStr, "|")
+		}
+		if p.People == nil {
+			p.People = []string{}
 		}
 		photos = append(photos, p)
 	}
@@ -293,23 +329,33 @@ func (a *App) handlePhotos(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]interface{}{"photos": photos})
 }
 
+// safePath validates and resolves a relative path within the photo directory.
+// Returns the full absolute path and true if safe, or empty string and false if not.
+func (a *App) safePath(relPath string) (string, bool) {
+	cleanPath := filepath.Clean(relPath)
+	if strings.Contains(cleanPath, "..") {
+		return "", false
+	}
+	fullPath := filepath.Join(a.photoDir, cleanPath)
+	absPath, err := filepath.Abs(fullPath)
+	if err != nil {
+		return "", false
+	}
+	if !strings.HasPrefix(absPath, a.photoDir+string(filepath.Separator)) && absPath != a.photoDir {
+		return "", false
+	}
+	return absPath, true
+}
+
 func (a *App) handleImage(w http.ResponseWriter, r *http.Request) {
-	// Path is /api/image/{relative-path}
 	relPath := strings.TrimPrefix(r.URL.Path, "/api/image/")
 	if relPath == "" {
 		http.Error(w, "No path specified", 400)
 		return
 	}
 
-	// Security: clean the path to prevent traversal
-	cleanPath := filepath.Clean(relPath)
-	if strings.Contains(cleanPath, "..") {
-		http.Error(w, "Forbidden", 403)
-		return
-	}
-
-	fullPath := filepath.Join(a.photoDir, cleanPath)
-	if !strings.HasPrefix(fullPath, a.photoDir) {
+	fullPath, ok := a.safePath(relPath)
+	if !ok {
 		http.Error(w, "Forbidden", 403)
 		return
 	}
@@ -360,24 +406,36 @@ func (a *App) handleSync(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"db error"}`, 500)
 		return
 	}
+	defer tx.Rollback() // no-op after successful commit
 
 	for _, p := range payload.Photos {
 		if p.Delete {
-			tx.Exec("DELETE FROM photos WHERE path = ?", p.Path)
+			if _, err := tx.Exec("DELETE FROM photos WHERE path = ?", p.Path); err != nil {
+				http.Error(w, `{"error":"db error during delete"}`, 500)
+				return
+			}
 			tx.Exec("DELETE FROM people_tags WHERE photo_path = ?", p.Path)
-			// Remove photo file
-			os.Remove(filepath.Join(a.photoDir, p.Path))
+			os.Remove(filepath.Join(a.photoDir, filepath.Clean(p.Path)))
 			deleted++
 			continue
 		}
 
 		var exists int
-		tx.QueryRow("SELECT COUNT(*) FROM photos WHERE path = ?", p.Path).Scan(&exists)
+		if err := tx.QueryRow("SELECT COUNT(*) FROM photos WHERE path = ?", p.Path).Scan(&exists); err != nil {
+			http.Error(w, `{"error":"db error during query"}`, 500)
+			return
+		}
 		if exists > 0 {
-			tx.Exec("UPDATE photos SET caption = ?, updated_at = datetime('now') WHERE path = ?", p.Caption, p.Path)
+			if _, err := tx.Exec("UPDATE photos SET caption = ?, updated_at = datetime('now') WHERE path = ?", p.Caption, p.Path); err != nil {
+				http.Error(w, `{"error":"db error during update"}`, 500)
+				return
+			}
 			updated++
 		} else {
-			tx.Exec("INSERT INTO photos(path, caption) VALUES(?, ?)", p.Path, p.Caption)
+			if _, err := tx.Exec("INSERT INTO photos(path, caption) VALUES(?, ?)", p.Path, p.Caption); err != nil {
+				http.Error(w, `{"error":"db error during insert"}`, 500)
+				return
+			}
 			added++
 		}
 
@@ -388,7 +446,10 @@ func (a *App) handleSync(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	tx.Commit()
+	if err := tx.Commit(); err != nil {
+		http.Error(w, `{"error":"db commit failed"}`, 500)
+		return
+	}
 
 	// Update config if provided
 	if payload.Config != nil {
@@ -431,13 +492,12 @@ func (a *App) handleSyncPhoto(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	cleanPath := filepath.Clean(relPath)
-	if strings.Contains(cleanPath, "..") {
+	fullPath, ok := a.safePath(relPath)
+	if !ok {
 		http.Error(w, "Forbidden", 403)
 		return
 	}
 
-	fullPath := filepath.Join(a.photoDir, cleanPath)
 	os.MkdirAll(filepath.Dir(fullPath), 0755)
 
 	f, err := os.Create(fullPath)
@@ -447,7 +507,9 @@ func (a *App) handleSyncPhoto(w http.ResponseWriter, r *http.Request) {
 	}
 	defer f.Close()
 
-	written, err := io.Copy(f, r.Body)
+	// Limit upload size
+	limited := io.LimitReader(r.Body, maxUploadSize)
+	written, err := io.Copy(f, limited)
 	if err != nil {
 		http.Error(w, "Failed to write file", 500)
 		return
@@ -456,7 +518,7 @@ func (a *App) handleSyncPhoto(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"ok":    true,
-		"path":  cleanPath,
+		"path":  filepath.Clean(relPath),
 		"bytes": written,
 	})
 }
@@ -479,6 +541,3 @@ func (a *App) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 var startTime = time.Now()
-
-// Suppress unused import warning for rand
-var _ = rand.Int

@@ -78,14 +78,16 @@ func TestConfigGetPut(t *testing.T) {
 		t.Fatalf("expected empty banner, got %q", config.Banner)
 	}
 
-	// PUT new config
-	body, _ := json.Marshal(Config{
-		Banner:           "Test Message",
-		SlideshowSeconds: 15,
-		Enabled:          true,
-		UpdatedBy:        "test",
+	// PUT new config (with auth token)
+	body, _ := json.Marshal(map[string]interface{}{
+		"banner":            "Test Message",
+		"slideshow_seconds": 15,
+		"enabled":           true,
+		"updated_by":        "test",
 	})
 	req = httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	req.Header.Set("X-Sync-Token", "test-token")
+	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	app.handleConfig(w, req)
 
@@ -343,6 +345,74 @@ func TestSyncUpdate(t *testing.T) {
 	json.Unmarshal(w.Body.Bytes(), &result)
 	if result["updated"].(float64) != 1 {
 		t.Fatalf("expected 1 updated, got %v", result["updated"])
+	}
+}
+
+func TestConfigPutUnauthorized(t *testing.T) {
+	app := setupTestApp(t)
+	defer app.db.Close()
+
+	body, _ := json.Marshal(map[string]interface{}{
+		"banner": "Hacked", "slideshow_seconds": 5, "enabled": true,
+	})
+
+	// No token
+	req := httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	app.handleConfig(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401 with no token, got %d", w.Code)
+	}
+
+	// Wrong token
+	body, _ = json.Marshal(map[string]interface{}{
+		"banner": "Hacked", "slideshow_seconds": 5, "enabled": true,
+	})
+	req = httptest.NewRequest("PUT", "/api/config", bytes.NewReader(body))
+	req.Header.Set("X-Sync-Token", "wrong-token")
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	app.handleConfig(w, req)
+	if w.Code != 401 {
+		t.Fatalf("expected 401 with wrong token, got %d", w.Code)
+	}
+}
+
+func TestSafePathBlocks(t *testing.T) {
+	app := setupTestApp(t)
+	defer app.db.Close()
+
+	tests := []struct {
+		path string
+		ok   bool
+	}{
+		{"vacation/beach.jpg", true},
+		{"photo.jpg", true},
+		{"../../../etc/passwd", false},
+		{"../../secret", false},
+		{"/etc/passwd", false},
+	}
+
+	for _, tc := range tests {
+		_, got := app.safePath(tc.path)
+		if got != tc.ok {
+			t.Errorf("safePath(%q) = %v, want %v", tc.path, got, tc.ok)
+		}
+	}
+}
+
+func TestSyncPhotoPathTraversal(t *testing.T) {
+	app := setupTestApp(t)
+	defer app.db.Close()
+
+	req := httptest.NewRequest("POST", "/api/sync/photo?path=../../etc/evil.jpg", bytes.NewReader([]byte("data")))
+	req.Header.Set("X-Sync-Token", "test-token")
+	w := httptest.NewRecorder()
+	app.handleSyncPhoto(w, req)
+
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for path traversal, got %d", w.Code)
 	}
 }
 
